@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from jax import jit, vmap, lax
 from functools import partial
 
-@partial(jit, static_argnames=('window_order', 'interlace', 'max_scatter_indices'))
+@partial(jit, static_argnames=('num_particles', 'window_order', 'interlace', 'max_scatter_indices'))
 def assign(boxsize, field, weight, pos, num_particles, window_order, interlace=0,  max_scatter_indices=100_000_000):
     """
     Parameters:
