@@ -89,7 +89,7 @@ class Measure_Pk:
         Pk_out = P_sum / N_sum * self.vol
         return k_mean, Pk_out, N_sum
 
-    @partial(jit, static_argnames=('self','ell','kbin_1d','mu_min','mu_max'))
+    @partial(jit, static_argnames=('self','ell','mu_min','mu_max'))
     def pk_auto(self, fieldk, ell=0, mu_min=0.0, mu_max=1.0):
         """
         Auto-spectrum multipole with optional mu-range.
@@ -103,7 +103,7 @@ class Measure_Pk:
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
         return self._compute(Pk1d, mask, self.kbin_1d)
 
-    @partial(jit, static_argnames=('self','ell','kbin_1d','mu_min','mu_max'))
+    @partial(jit, static_argnames=('self','ell','mu_min','mu_max'))
     def pk_cross(self, fieldk1, fieldk2, ell=0, mu_min=0.0, mu_max=1.0):
         """
         Cross-spectrum multipole with optional mu-range.
@@ -124,7 +124,8 @@ class Measure_spectra_FFT:
         self.vol     = self.boxsize**3
         self.ng      = ng
         kvec         = rfftn_kvec([ng,]*3, self.boxsize)
-        self.kmag    = jnp.sqrt(rfftn_k2(kvec))
+        k2           = jnp.sum(kvec**2, axis=0)
+        self.kmag    = jnp.sqrt(k2)
         self.kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
         self.num_bins = self.kbin_1d.shape[0] - 1
 
