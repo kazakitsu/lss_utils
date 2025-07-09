@@ -3,7 +3,7 @@
 __version__ = "0.1.0"
 
 try:
-    import jax.numpy  # noqa: F401
+    import jax.numpy 
     use_jax = True
 except ImportError:
     use_jax = False
@@ -15,7 +15,6 @@ else:
     from .assign_util import assign
     from .power_util import Measure_Pk, Measure_spectra_FFT, rfftn_kvec
 
-# 直接 import * をしたときに出てくる名前を制御
 __all__ = [
     "rfftn_kvec",
     "Measure_spectra_FFT",

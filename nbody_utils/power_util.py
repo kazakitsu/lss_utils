@@ -37,8 +37,8 @@ class Measure_Pk:
         self.kidx = np.digitize(self.kmag_1d, self.kbin_1d, right=True)
 
         # count modes (real-to-complex symmetry)
-        Nk = np.full(k2.shape, 2, dtype=int)
-        Nk.flat[0] = 1  # zero mode
+        Nk = np.full_like(k2, 2, dtype=int)
+        Nk[...,0] = 1 
         if k2.shape[-1] % 2 == 0:
             Nk[..., -1] = 1
         self.Nk_1d = Nk.ravel()
@@ -101,7 +101,7 @@ class Measure_Pk:
         Pk1d = F * np.conj(F)
         # apply Legendre and mode count
         leg = self.legendre_stack[ell//2]
-        Pk1d = Pk1d * leg * self.Nk_1d
+        Pk1d = Pk1d * leg
         Pk1d[0] = 0.0
 
         # mu mask
@@ -114,7 +114,7 @@ class Measure_Pk:
         """
         Pk1d = fieldk1.ravel() * np.conj(fieldk2.ravel())
         leg = self.legendre_stack[ell//2]
-        Pk1d = Pk1d * leg * self.Nk_1d
+        Pk1d = Pk1d * leg
         Pk1d[0] = 0.0
 
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)

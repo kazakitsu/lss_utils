@@ -64,25 +64,21 @@ class Measure_Pk:
     def _compute(self, Pk1d, mask, kbin_edges):
         # apply mask and weights
         k_arr  = self.kmag_1d
-        mu2    = self.mu2_1d
         Nk_arr = self.Nk_1d
 
         # select modes
-        sel = mask
-        k_sel   = k_arr[sel]
-        P_sel   = (Pk1d * Nk_arr)[sel]
-        Nk_sel  = Nk_arr[sel]
+        m   = mask.astype(Pk1d.dtype)           # shape (n_modes,)
+        w_N  = Nk_arr * m                       # mode-count after mask
+        w_k  = k_arr * w_N                      # k x Nk x mask
+        w_P  = (Pk1d * m * Nk_arr).real         # P x Nk x mask
 
         # digitize into k-bins
-        kidx = jnp.digitize(k_sel, kbin_edges, right=True)
+        kidx = jnp.digitize(k_arr, kbin_edges, right=True)
 
         # accumulate
-        k_sum = jnp.bincount(kidx, weights=k_sel * Nk_sel,
-                             length=kbin_edges.shape[0])[1:]
-        P_sum = jnp.bincount(kidx, weights=P_sel.real,
-                             length=kbin_edges.shape[0])[1:]
-        N_sum = jnp.bincount(kidx, weights=Nk_sel,
-                             length=kbin_edges.shape[0])[1:]
+        k_sum = jnp.bincount(kidx, weights=w_k, length=kbin_edges.shape[0])[1:]
+        P_sum = jnp.bincount(kidx, weights=w_P, length=kbin_edges.shape[0])[1:]
+        N_sum = jnp.bincount(kidx, weights=w_N, length=kbin_edges.shape[0])[1:]
 
         # normalize
         k_mean = k_sum / N_sum
@@ -97,7 +93,7 @@ class Measure_Pk:
         """
         Pk1d = (fieldk.ravel() * fieldk.ravel().conj())
         leg = self.legendre_stack[ell//2]
-        Pk1d = Pk1d * leg * self.Nk_1d
+        Pk1d = Pk1d * leg
         Pk1d = Pk1d.at[0].set(0.0)
 
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
@@ -110,7 +106,7 @@ class Measure_Pk:
         """
         Pk1d = (fieldk1.ravel() * fieldk2.ravel().conj())
         leg = self.legendre_stack[ell//2]
-        Pk1d = Pk1d * leg * self.Nk_1d
+        Pk1d = Pk1d * leg
         Pk1d = Pk1d.at[0].set(0.0)
 
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
