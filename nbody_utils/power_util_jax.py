@@ -4,48 +4,63 @@ import jax.numpy as jnp
 from jax import jit, vmap, lax
 from functools import partial
 
+@partial(jit, static_argnames=('shape', 'dtype'))
 def rfftn_kvec(shape, boxsize, dtype=float):
     """
-    Generate wavevectors for `jax.numpy.fft.rfftn`
+    Generate wavevectors for `jax.numpy.fft.rfftn`.
+    JAX version using jnp.meshgrid.
     """
-    kvec = [jnp.fft.fftfreq(n, d=1./shape[-1]).astype(dtype) for n in shape[:-1]]
-    kvec.append(jnp.fft.rfftfreq(shape[-1], d=1./shape[-1]).astype(dtype))
-    kvec = jnp.meshgrid(*kvec, indexing='ij')
-    kvec = jnp.stack(kvec, axis=0)
-    return kvec * (2 * jnp.pi / boxsize)
+    # full FFT frequencies for all but last axis
+
+    spacing = boxsize / (2.*jnp.pi) / shape[-1]
+    # Create 1D frequency arrays for each dimension.
+    freqs = [jnp.fft.fftfreq(n, d=spacing) for n in shape[:-1]]
+    freqs.append(jnp.fft.rfftfreq(shape[-1], d=spacing))
+
+    # Use jnp.meshgrid to create the coordinate grid.
+    kvec_grid = jnp.meshgrid(*freqs, indexing='ij')
+    
+    # Stack the coordinate arrays to get the final (D, N1, N2, ...) shape.
+    kvec = jnp.stack(kvec_grid, axis=0)
+    return kvec.astype(dtype)
 
 class Measure_Pk:
-    def __init__(self, boxsize, ng, kbin_1d, ell_max=0, leg_fac=True):
+    def __init__(self, boxsize, ng, kbin_edges, ell_max=0, leg_fac=True):
         self.boxsize = boxsize
-        self.kbin_1d = jnp.array(kbin_1d)
-        self.num_bins = self.kbin_1d.shape[0] - 1
+        self.kbin_edges = jnp.array(kbin_edges)
+        self.num_bins = self.kbin_edges.shape[0] - 1
         self.vol = boxsize**3
         self.ng = ng
 
         # precompute k-vector grid
-        kvec = rfftn_kvec([ng]*3, boxsize)
+        kvec = rfftn_kvec((ng,)*3, boxsize)
         k2 = (kvec**2).sum(axis=0)
+        k_is_zero = (k2 == 0.0)
+        
         self.kmag_1d = jnp.sqrt(k2).ravel()
 
         # per-mode digitized k-index and counts
-        self.kidx = jnp.digitize(self.kmag_1d, self.kbin_1d, right=True)
+        self.kidx = jnp.digitize(self.kmag_1d, self.kbin_edges, right=True)
+
         Nk = jnp.full_like(k2, 2, dtype=jnp.int32)
         Nk = Nk.at[...,0].set(1)
-        if k2.shape[-1] % 2 == 0:
+        if self.ng % 2 == 0:
             Nk = Nk.at[..., -1].set(1)
         self.Nk_1d = Nk.ravel()
 
         # mean k and total counts per bin
-        k_tot = jnp.bincount(self.kidx, weights=self.kmag_1d * self.Nk_1d,
-                             length=self.num_bins+1)[1:]
-        N_tot = jnp.bincount(self.kidx, weights=self.Nk_1d,
-                             length=self.num_bins+1)[1:]
-        self.k_mean = k_tot / N_tot
+        k_tot = jnp.bincount(self.kidx, 
+                             weights=self.kmag_1d * self.Nk_1d,
+                             length=self.num_bins+2)[1:-1]
+        N_tot = jnp.bincount(self.kidx, 
+                             weights=self.Nk_1d,
+                             length=self.num_bins+2)[1:-1]
+        
+        self.k_mean = k_tot / jnp.maximum(N_tot, 1)
         self.Nk = N_tot
 
         # precompute mu^2 per mode
-        mu2 = (kvec[2]**2) / k2
-        mu2 = mu2.at[0,0,0].set(0.0)
+        mu2 = jnp.where(k_is_zero, 0.0, kvec[2]**2 / k2)
         self.mu2_1d = mu2.ravel()
 
         # build Legendre factors for monopole/quadrupole/etc.
@@ -61,79 +76,67 @@ class Measure_Pk:
                 legs.append(fac * 0.125 * (35*self.mu2_1d**2 - 30*self.mu2_1d + 3))
         self.legendre_stack = jnp.stack(legs, axis=0)
 
-    def _compute(self, Pk1d, mask, kbin_edges):
+    def compute_mu_mean(self, mu_min=0.0, mu_max=1.0):
+        """
+        Computes the mean mu value for the given mu range.
+        """
+        mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
+        mu_mean = jnp.sum(self.mu2_1d * mask * self.Nk_1d) / jnp.sum(mask * self.Nk_1d)
+        return mu_mean
+
+    def _compute(self, Pk1d, mask):
         # apply mask and weights
-        k_arr  = self.kmag_1d
-        Nk_arr = self.Nk_1d
+        w_P = (Pk1d * mask * self.Nk_1d).real
+        w_N = self.Nk_1d * mask
 
-        # select modes
-        m   = mask.astype(Pk1d.dtype)           # shape (n_modes,)
-        w_N  = Nk_arr * m                       # mode-count after mask
-        w_k  = k_arr * w_N                      # k x Nk x mask
-        w_P  = (Pk1d * m * Nk_arr).real         # P x Nk x mask
+        P_sum = jnp.bincount(self.kidx, weights=w_P, length=self.num_bins + 2)[1:-1]
+        N_sum = jnp.bincount(self.kidx, weights=w_N, length=self.num_bins + 2)[1:-1]
 
-        # digitize into k-bins
-        kidx = jnp.digitize(k_arr, kbin_edges, right=True)
+        Pk_binned = jnp.where(N_sum > 0, P_sum / N_sum, 0.0)
 
-        # accumulate
-        k_sum = jnp.bincount(kidx, weights=w_k, length=kbin_edges.shape[0])[1:]
-        P_sum = jnp.bincount(kidx, weights=w_P, length=kbin_edges.shape[0])[1:]
-        N_sum = jnp.bincount(kidx, weights=w_N, length=kbin_edges.shape[0])[1:]
+        return jnp.array([self.k_mean, Pk_binned * self.vol, N_sum]).T
 
-        # normalize
-        k_mean = k_sum / N_sum
-        Pk_out = P_sum / N_sum * self.vol
-        return k_mean, Pk_out, N_sum
-
-    @partial(jit, static_argnames=('self','ell','mu_min','mu_max'))
-    def pk_auto(self, fieldk, ell=0, mu_min=0.0, mu_max=1.0):
+    @partial(jit, static_argnames=('self', 'ell'))
+    def __call__(self, fieldk1, fieldk2=None, ell=0, mu_min=0.0, mu_max=1.0):
         """
-        Auto-spectrum multipole with optional mu-range.
-        If mu_min<0 or mu_max>1, defaults to full range.
+        Computes auto or cross-power spectrum for a given multipole,
+        with an optional mu range.
         """
-        Pk1d = (fieldk.ravel() * fieldk.ravel().conj())
-        leg = self.legendre_stack[ell//2]
-        Pk1d = Pk1d * leg
-        Pk1d = Pk1d.at[0].set(0.0)
+        if fieldk2 is None:
+            fieldk2 = fieldk1
+        
+        Pk1d = fieldk1.ravel() * jnp.conj(fieldk2.ravel())
+        
+        # Apply Legendre polynomial for multipole selection
+        Pk1d = Pk1d * self.legendre_stack[ell // 2]
+        Pk1d = Pk1d.at[0].set(0.0) # Exclude DC mode
 
+        # Create mask based on the mu range
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
-        return self._compute(Pk1d, mask, self.kbin_1d)
-
-    @partial(jit, static_argnames=('self','ell','mu_min','mu_max'))
-    def pk_cross(self, fieldk1, fieldk2, ell=0, mu_min=0.0, mu_max=1.0):
-        """
-        Cross-spectrum multipole with optional mu-range.
-        """
-        Pk1d = (fieldk1.ravel() * fieldk2.ravel().conj())
-        leg = self.legendre_stack[ell//2]
-        Pk1d = Pk1d * leg
-        Pk1d = Pk1d.at[0].set(0.0)
-
-        mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
-        return self._compute(Pk1d, mask, self.kbin_1d)
+        
+        return self._compute(Pk1d, mask)
 
 
 class Measure_spectra_FFT:
-    def __init__(self, boxsize, ng, kbin_1d, bispec=True, open_triangle=False):
+    def __init__(self, boxsize, ng, kbin_edges, bispec=True, open_triangle=False):
         self.boxsize = boxsize
-        self.kbin_1d = jnp.array(kbin_1d)
+        self.kbin_edges = jnp.array(kbin_edges)
         self.vol     = self.boxsize**3
         self.ng      = ng
-        kvec         = rfftn_kvec([ng,]*3, self.boxsize)
-        k2           = jnp.sum(kvec**2, axis=0)
-        self.kmag    = jnp.sqrt(k2)
-        self.kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
-        self.num_bins = self.kbin_1d.shape[0] - 1
+        kvec         = rfftn_kvec((ng,)*3, self.boxsize)
+        self.kmag = jnp.sqrt(jnp.sum(kvec**2, axis=0))
+        self.kbin_centers = 0.5 * (self.kbin_edges[1:] + self.kbin_edges[:-1])
+        self.num_bins = self.kbin_edges.shape[0] - 1
 
         if bispec:
             triangle_idx_list = []
 
-            kmin_bins = self.kbin_1d[:-1]
-            kmax_bins = self.kbin_1d[1:]
+            kmin_bins = self.kbin_edges[:-1]
+            kmax_bins = self.kbin_edges[1:]
 
             for i in range(self.num_bins):
                 for j in range(i, self.num_bins):
-                    for k in range(j, self.num_bins):
+                    for k in range(j, self.num_bins):   ### k1 <= k2 <= k3
                         k1 = float(self.kbin_centers[i])
                         k2 = float(self.kbin_centers[j])
                         k3 = float(self.kbin_centers[k])
@@ -154,197 +157,93 @@ class Measure_spectra_FFT:
                             if k3 >= abs(k1 - k2) and k3 <= (k1 + k2):
                                 triangle_idx_list.append((i, j, k))
             self.triangle_idxs = jnp.array(triangle_idx_list)
-            self.k123 = jnp.array([self.kbin_centers[self.triangle_idxs[:,0]], 
-                                   self.kbin_centers[self.triangle_idxs[:,1]], 
-                                   self.kbin_centers[self.triangle_idxs[:,2]]]).T
 
-    def filter_field(self, fieldk, kmin, kmax):
+    @partial(jit, static_argnames=('self',))
+    def _filter_field(self, fieldk, kmin, kmax):
+        """Helper to filter a field in k-space and transform to real space."""
         mask = (kmin <= self.kmag) & (self.kmag < kmax)
-        fieldk_filtered = fieldk * mask
-        fieldr = jnp.fft.irfftn(fieldk_filtered) * (self.ng**3)
-        return fieldr
+        return jnp.fft.irfftn(fieldk * mask) * (self.ng**3)
 
-    def measure_pk_bk(self, fieldk,):
-        num_bins = len(self.kbin_1d) - 1
-        kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
-
-        onesk = jnp.ones_like(fieldk)
-
-        def filter_all_fields(kmin, kmax):
-            fieldr = self.filter_field(fieldk, kmin, kmax)
-            onesr   = self.filter_field(onesk,  kmin, kmax)
-            return fieldr, onesr
-
-        kmins = self.kbin_1d[:-1]
-        kmaxs = self.kbin_1d[1:]
-        Ix_fields, norm_fields = vmap(filter_all_fields)(kmins, kmaxs)
-
-        def compute_triangle(idx):
-            i, j, k = idx
-            k1 = kbin_centers[i]
-            k2 = kbin_centers[j]
-            k3 = kbin_centers[k]
-
-            valid = jnp.logical_and(k3 >= jnp.abs(k1 - k2), k3 <= (k1 + k2))
-
-            def true_fn(_):
-                product_field = Ix_fields[i] * Ix_fields[j] * Ix_fields[k]
-                bispec = jnp.sum(product_field) * self.vol * self.vol
-                normalization = norm_fields[i] * norm_fields[j] * norm_fields[k]
-                num_triangles = jnp.sum(normalization)
-                bispec /= num_triangles
-                return jnp.array([k1, k2, k3, bispec.real, num_triangles / self.ng**3])
-            return lax.cond(valid, true_fn, lambda _: jnp.zeros(5), operand=None)
-
-        triangles = vmap(compute_triangle)(self.triangle_idxs)
-
-        def compute_power(i):
-            product_field = Ix_fields[i] * Ix_fields[i]
-            power = jnp.sum(product_field) * self.vol
-            normalization = norm_fields[i] ** 2
-            num_modes = jnp.sum(normalization)
-            power /= num_modes
-            return jnp.array([kbin_centers[i], power.real, num_modes / self.ng**3])
-        
-        lines = vmap(compute_power)(jnp.arange(num_bins))
-
-        return lines, triangles
+    @partial(jit, static_argnames=('self',))
+    def compute_pk_bk(self, fieldk):
+        """Computes both P(k) and B(k) for a given field."""
+        pk_results = self.compute_pk(fieldk)
+        bk_results = self.compute_bk(fieldk)
+        return pk_results, bk_results
 
     @partial(jit, static_argnames=('self', 'batch_size'))
-    def measure_bk(self, fieldk, batch_size=20):
-        num_bins = len(self.kbin_1d) - 1
-        kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
+    def compute_bk(self, fieldk1, fieldk2=None, fieldk3=None, batch_size=16):
+        """
+        Computes the auto or cross-bispectrum using a memory-safe batching method.
+        """
+        if fieldk2 is None: fieldk2 = fieldk1
+        if fieldk3 is None: fieldk3 = fieldk2
+        onesk = jnp.ones_like(fieldk1)
 
-        onesk = jnp.ones_like(fieldk)
+        def compute_single_triangle(indices):
+            """Computes Bk for one (i, j, k) triplet of k-bins."""
+            i, j, k = indices
+            kmin_i, kmax_i = self.kbin_edges[i], self.kbin_edges[i+1]
+            kmin_j, kmax_j = self.kbin_edges[j], self.kbin_edges[j+1]
+            kmin_k, kmax_k = self.kbin_edges[k], self.kbin_edges[k+1]
 
-        def filter_all_fields(kmin, kmax):
-            fieldr = self.filter_field(fieldk, kmin, kmax)
-            onesr  = self.filter_field(onesk,  kmin, kmax)
-            return fieldr, onesr
+            I1r = self._filter_field(fieldk1, kmin_i, kmax_i)
+            I2r = self._filter_field(fieldk2, kmin_j, kmax_j)
+            I3r = self._filter_field(fieldk3, kmin_k, kmax_k)
+            bispec_num = jnp.sum(I1r * I2r * I3r)
 
-        kmins = self.kbin_1d[:-1]
-        kmaxs = self.kbin_1d[1:]
-        Ix_fields, norm_fields = vmap(filter_all_fields)(kmins, kmaxs)
+            N1r = self._filter_field(onesk, kmin_i, kmax_i)
+            N2r = self._filter_field(onesk, kmin_j, kmax_j)
+            N3r = self._filter_field(onesk, kmin_k, kmax_k)
+            norm = jnp.sum(N1r * N2r * N3r)
+            
+            bispec = jnp.where(norm > 0, bispec_num / norm, 0.0)
+            # Return a single array for cleaner vmap handling
+            return jnp.array([(bispec * self.vol**2).real, norm])
 
-        def compute_triangle(idx):
-            i, j, k = idx
-            k1 = kbin_centers[i]
-            k2 = kbin_centers[j]
-            k3 = kbin_centers[k]
-
-            valid = jnp.logical_and(k3 >= jnp.abs(k1 - k2), k3 <= (k1 + k2))
-
-            def true_fn(_):
-                product_field = Ix_fields[i] * Ix_fields[j] * Ix_fields[k]
-                bispec = jnp.sum(product_field) * self.vol * self.vol
-                normalization = norm_fields[i] * norm_fields[j] * norm_fields[k]
-                num_triangles = jnp.sum(normalization)
-                bispec /= num_triangles
-                return jnp.array([k1, k2, k3, bispec.real, num_triangles / self.ng**3])
-            return lax.cond(valid, true_fn, lambda _: jnp.zeros(5), operand=None)
-
+        # Use lax.fori_loop for JIT-compatible batching
         n_triangles = self.triangle_idxs.shape[0]
-        triangles_batches = []
-        for start in range(0, n_triangles, batch_size):
-            end = start + batch_size
-            batch_idxs = self.triangle_idxs[start:end]
-            batch_triangles = vmap(compute_triangle)(batch_idxs)
-            triangles_batches.append(batch_triangles)
-        triangles = jnp.concatenate(triangles_batches, axis=0)
-
-        return triangles
-
-    @partial(jit, static_argnames=('self'))
-    def measure_pk(self, fieldk):
-        num_bins = self.kbin_1d.shape[0] - 1
-        kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
-        onesk = jnp.ones_like(fieldk)
-
-        def filter_two_fields(kmin, kmax):
-            fieldr = self.filter_field(fieldk, kmin, kmax)
-            onesr  = self.filter_field(onesk,  kmin, kmax)
-            return fieldr, onesr
-
-        kmins = self.kbin_1d[:-1]
-        kmaxs = self.kbin_1d[1:]
-        Ix_fields, norm_fields = vmap(filter_two_fields)(kmins, kmaxs)
-
-        def compute_power(i):
-            product_field = Ix_fields[i] * Ix_fields[i]
-            power = jnp.sum(product_field) * self.vol
-            normalization = norm_fields[i] ** 2
-            num_modes = jnp.sum(normalization)
-            power /= num_modes
-            return jnp.array([kbin_centers[i], power.real, num_modes / self.ng**3])
+        n_batches = (n_triangles + batch_size - 1) // batch_size
         
-        lines = vmap(compute_power)(jnp.arange(num_bins))
-        return lines
+        def body_fn(i, results_carry):
+            start = i * batch_size
+            # Use dynamic_slice for reading indices
+            batch_idxs = lax.dynamic_slice_in_dim(self.triangle_idxs, start, batch_size, axis=0)
+            # vmap computes results for the batch
+            batch_results = vmap(compute_single_triangle)(batch_idxs)
+            # *** CORRECTED LINE ***
+            # Use lax.dynamic_update_slice for writing results at a dynamic start index
+            return lax.dynamic_update_slice(results_carry, batch_results, (start, 0))
 
+        initial_results = jnp.zeros((n_triangles, 2))
+        bk_tab = lax.fori_loop(0, n_batches, body_fn, initial_results)
+        
+        k123 = jnp.array([self.kbin_centers[self.triangle_idxs[:,0]], 
+                          self.kbin_centers[self.triangle_idxs[:,1]], 
+                          self.kbin_centers[self.triangle_idxs[:,2]]]).T
+        
+        return jnp.hstack([k123, bk_tab])
 
     @partial(jit, static_argnames=('self',))
-    def measure_bispectrum_(self, field1k, field2k, field3k):
-        num_bins = len(self.kbin_1d) - 1
-        kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
+    def compute_pk(self, fieldk1, fieldk2=None):
+        """Computes the auto or cross-power spectrum using the FFT method."""
+        if fieldk2 is None: fieldk2 = fieldk1
+        onesk = jnp.ones_like(fieldk1)
 
-        onesk = jnp.ones_like(field1k)
+        def compute_power_for_bin(i):
+            kmin, kmax = self.kbin_edges[i], self.kbin_edges[i+1]
+            
+            I1r = self._filter_field(fieldk1, kmin, kmax)
+            I2r = self._filter_field(fieldk2, kmin, kmax)
+            Nr  = self._filter_field(onesk, kmin, kmax)
+            
+            power_numerator = jnp.sum(I1r * I2r)
+            normalization = jnp.sum(Nr * Nr)
+            
+            power = jnp.where(normalization > 0, power_numerator / normalization, 0.0)
+            # Return a single array for cleaner vmap handling
+            return jnp.array([(power * self.vol).real, normalization])
 
-        def filter_all_fields(kmin, kmax):
-            field1r = self.filter_field(field1k, kmin, kmax)
-            field2r = self.filter_field(field2k, kmin, kmax)
-            field3r = self.filter_field(field3k, kmin, kmax)
-            onesr   = self.filter_field(onesk,  kmin, kmax)
-            return field1r, field2r, field3r, onesr
-
-        kmins = self.kbin_1d[:-1]
-        kmaxs = self.kbin_1d[1:]
-        I1x_fields, I2x_fields, I3x_fields, norm_fields = vmap(filter_all_fields)(kmins, kmaxs)
-
-        def compute_triangle(idx):
-            i, j, k = idx
-            k1 = kbin_centers[i]
-            k2 = kbin_centers[j]
-            k3 = kbin_centers[k]
-
-            valid = jnp.logical_and(k3 >= jnp.abs(k1 - k2), k3 <= (k1 + k2))
-
-            def true_fn(_):
-                product_field = I1x_fields[i] * I2x_fields[j] * I3x_fields[k]
-                bispec = jnp.sum(product_field) * self.vol * self.vol
-                normalization = norm_fields[i] * norm_fields[j] * norm_fields[k]
-                num_triangles = jnp.sum(normalization)
-                bispec /= num_triangles
-                return jnp.array([k1, k2, k3, bispec.real, num_triangles / self.ng**3])
-            return lax.cond(valid, true_fn, lambda _: jnp.zeros(5), operand=None)
-
-        triangles = vmap(compute_triangle)(self.triangle_idxs)
-
-        return triangles
-
-
-    @partial(jit, static_argnames=('self',))
-    def measure_power_(self, field1k, field2k):
-        num_bins = self.kbin_1d.shape[0] - 1
-        kbin_centers = 0.5 * (self.kbin_1d[1:] + self.kbin_1d[:-1])
-        onesk = jnp.ones_like(field1k)
-
-        def filter_two_fields(kmin, kmax):
-            field1r = self.filter_field(field1k, kmin, kmax)
-            field2r = self.filter_field(field2k, kmin, kmax)
-            onesr   = self.filter_field(onesk,  kmin, kmax)
-            return field1r, field2r, onesr
-
-        kmins = self.kbin_1d[:-1]
-        kmaxs = self.kbin_1d[1:]
-        I1x_fields, I2x_fields, norm_fields = vmap(filter_two_fields)(kmins, kmaxs)
-
-        def compute_power(i):
-            product_field = I1x_fields[i] * I2x_fields[i]
-            power = jnp.sum(product_field) * self.vol
-            normalization = norm_fields[i] ** 2
-            num_modes = jnp.sum(normalization)
-            power /= num_modes
-            return jnp.array([kbin_centers[i], power.real, num_modes / self.ng**3])
-        
-        lines = vmap(compute_power)(jnp.arange(num_bins))
-        return lines
-
+        # vmap over all bins for efficient computation
+        results = vmap(compute_power_for_bin)(jnp.arange(self.num_bins))
+        return jnp.hstack([self.kbin_centers[:, None], results])

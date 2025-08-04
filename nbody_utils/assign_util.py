@@ -1,126 +1,188 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+from typing import Tuple
+
 import numpy as np
 
-# ---------- single-chunk core ----------
-def _single_assign(field, pos_mesh, weight, ng, window_order):
-    """Core scatter-add for one chunk using np.bincount (matches JAX logic)."""
-    # base cell, fractional offset and shifts
-    if window_order == 1:          # NGP
-        imesh  = np.floor(pos_mesh).astype(np.int32)
-        fmesh  = np.zeros_like(pos_mesh)
-        shifts = np.array([[0, 0, 0]], np.int32)
-    elif window_order == 2:        # CIC
-        imesh  = np.floor(pos_mesh).astype(np.int32)
-        fmesh  = pos_mesh - imesh
-        shifts = np.stack(
-            np.meshgrid([0, 1], [0, 1], [0, 1], indexing="ij"), -1
-        ).reshape(-1, 3).astype(np.int32)
-    else:                          # TSC
-        imesh  = (np.floor(pos_mesh - 1.5).astype(np.int32) + 2)
-        fmesh  = pos_mesh - imesh
-        shifts = np.stack(
-            np.meshgrid([-1, 0, 1], [-1, 0, 1], [-1, 0, 1], indexing="ij"), -1
-        ).reshape(-1, 3).astype(np.int32)
+# -----------------------------------------------------------------------------
+# public class
+# -----------------------------------------------------------------------------
 
-    imesh %= ng                               # periodic BC
-    S, N = shifts.shape[0], pos_mesh.shape[1]
-
-    # flat indices (3,S*N)
-    idx = (shifts[:, :, None] + imesh[None, :, :]) % ng       # (S,3,N)
-    idx = idx.transpose(1, 0, 2).reshape(3, -1)               # (3,S*N)
-    flat_idx = (idx[0] * ng + idx[1]) * ng + idx[2]           # (S*N,)
-
-    # weights (S*N,)
-    def w_vec(sh):
-        if window_order == 1:
-            return np.ones(N, dtype=pos_mesh.dtype)
-        elif window_order == 2:
-            return np.prod(
-                np.where(sh[:, None] == 0, 1.0 - fmesh, fmesh), axis=0
-            )
-        else:  # TSC
-            return np.prod(
-                np.where(
-                    sh[:, None] == 0,
-                    0.75 - fmesh ** 2,
-                    0.5 * (fmesh ** 2 + sh[:, None] * fmesh + 0.25),
-                ),
-                axis=0,
-            )
-
-    W = np.vstack([w_vec(sh) for sh in shifts])              # (S,N)
-    flat_w = (W * weight[None, :]).reshape(-1).astype(field.dtype)
-
-    # single bincount reduce
-    flat_field = field.ravel()
-    flat_field += np.bincount(
-        flat_idx, weights=flat_w, minlength=flat_field.size
-    ).astype(field.dtype)
-    return flat_field.reshape(field.shape)
-
-
-# ---------- public assign (chunk + bincount) ----------
-def assign(
-    boxsize,
-    field,
-    weight,
-    pos,
-    num_particles,
-    window_order,
-    interlace=0,
-    contd=0,
-    max_scatter_indices=100_000_000,
-):
+class Mesh_Assignment:
     """
-    NumPy assign with the same chunk-and-bincount strategy as the JAX version.
-    Produces bit-wise identical results (up to rounding) given the same dtype.
+    Example
+    -------
+    >>> mesh = Mesh_Assignment(boxsize=1000.0, ng=512, window_order=2,interlace=True)
+    >>> field_k = mesh.assign_fft(pos, mass)
     """
-    ng = field.shape[0]
-    cell = boxsize / ng
 
-    # flatten if needed
+    def __init__(self,
+                 boxsize: float,
+                 ng: int,
+                 window_order: int,
+                 *,
+                 interlace: bool = False,
+                 normalize: bool = True,
+                 max_scatter_indices: int = 100_000_000):
+        self.boxsize = float(boxsize)
+        self.ng = int(ng)
+        self.window_order = int(window_order)
+        self.interlace = bool(interlace)
+        self.normalize = bool(normalize)
+        self.max_scatter_indices = int(max_scatter_indices)
+
+        self.cell = self.boxsize / self.ng
+        self.kvec = _rfftn_kvec((self.ng,) * 3, self.boxsize, dtype=np.float32)
+        self.Wk = _deconvolve(self.kvec, self.boxsize, self.window_order)
+
+    # ------------------------------------------------------------------
+    # public methods
+    # ------------------------------------------------------------------
+    # ---------------- public helpers ----------------
+    def assign_to_grid(self, pos, weight, *, interlace: bool = False, normalize_mean: bool = True):
+        return _assign_to_grid(self.ng,
+                               self.window_order,
+                               self.cell,
+                               pos,
+                               weight,
+                               interlace,
+                               normalize_mean,
+                               self.max_scatter_indices)
+
+    def fft_deconvolve(self, field_r, field_r_i=None):
+        field_k = np.fft.rfftn(field_r) / self.ng ** 3
+        if field_r_i is not None:
+            field_k_i = np.fft.rfftn(field_r_i) / self.ng ** 3
+            nvec = self.kvec * (self.boxsize / (2.0 * np.pi))
+            phase = np.exp(1j * np.pi * np.sum(nvec, axis=0) / self.ng)
+            field_k = 0.5 * (field_k + field_k_i * phase)
+        field_k *= self.Wk
+        if self.normalize:
+            field_k[0, 0, 0] = 0.0
+        return field_k
+
+    def assign_fft(self, pos, weight):
+        field_r = self.assign_to_grid(pos, weight, interlace=False, normalize_mean=self.normalize)
+        if self.interlace:
+            field_r_i = self.assign_to_grid(pos, weight, interlace=True, normalize_mean=self.normalize)
+            return self.fft_deconvolve(field_r, field_r_i)
+        return self.fft_deconvolve(field_r)
+
+# -----------------------------------------------------------------------------
+# grid assignment with chunking
+# -----------------------------------------------------------------------------
+
+def _assign_to_grid(ng: int,
+                    window_order: int,
+                    cell: float,
+                    pos,
+                    weight,
+                    interlace: bool,
+                    normalize: bool,
+                    max_scatter_indices: int):
+    pos = np.asarray(pos)
+    weight = np.asarray(weight)
     if pos.ndim == 4:
-        pos = pos.reshape(3, -1)
-        weight = weight.reshape(-1)
+        pos, weight = pos.reshape(3, -1), weight.reshape(-1)
 
     pos_mesh = pos / cell
     if interlace:
         pos_mesh += 0.5
 
+    num_p = pos.shape[1]
     n_shifts = {1: 1, 2: 8, 3: 27}[window_order]
-    total_scatter = num_particles * n_shifts
+    chunk_sz = min(max(max_scatter_indices // n_shifts, 1), num_p)
 
-    # choose static chunk size identical to the JAX rule
-    chunk_size = max_scatter_indices // n_shifts
-    chunk_size = int(min(chunk_size, num_particles))
-    n_chunks = (num_particles + chunk_size - 1) // chunk_size
+    field = np.zeros((ng, ng, ng), dtype=pos.dtype)
+    for start in range(0, num_p, chunk_sz):
+        end = min(start + chunk_sz, num_p)
+        field = _single_assign(field,
+                               pos_mesh[:, start:end],
+                               weight[start:end],
+                               ng,
+                               window_order)
 
-    # work on a flat view to avoid extra ravel/reshape in the loop
-    #flat = field.ravel()
-    #for i in range(n_chunks):
-    #    start = i * chunk_size
-    #    end = start + chunk_size
-    #    flat_chunk = _single_assign(
-    #        flat.reshape(field.shape),
-    #        pos_mesh[:, start:end],
-    #        weight[start:end],
-    #        ng,
-    #        window_order,
-    #    ).ravel()
-    #    flat[:] = flat_chunk  # inplace update (no extra allocation)
-
-    for i in range(n_chunks):
-        start, end = i*chunk_size, (i+1)*chunk_size
-        field = _single_assign(
-            field,
-            pos_mesh[:, start:end],
-            weight[start:end],
-            ng,
-            window_order,
-        )
-
-    # per-file normalisation
-    if contd == 0:
-        flat /= num_particles / ng ** 3
-
+    if normalize:
+        field /= (num_p / ng ** 3)
     return field
+
+# -----------------------------------------------------------------------------
+# per‑chunk scatter
+# -----------------------------------------------------------------------------
+
+def _single_assign(field: np.ndarray,
+                   pos_mesh: np.ndarray,
+                   weight: np.ndarray,
+                   ng: int,
+                   window_order: int) -> np.ndarray:
+    if pos_mesh.size == 0:
+        return field
+
+    # base cell & shift list ---------------------------------
+    if window_order == 1:  # NGP
+        imesh = np.floor(pos_mesh).astype(int)
+        fmesh = np.zeros_like(pos_mesh)
+        shifts = [(0, 0, 0)]
+    elif window_order == 2:  # CIC
+        imesh = np.floor(pos_mesh).astype(int)
+        fmesh = pos_mesh - imesh
+        shifts = [(dx, dy, dz) for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)]
+    else:  # TSC
+        imesh = (np.floor(pos_mesh - 1.5).astype(int) + 2)
+        fmesh = pos_mesh - imesh
+        shifts = [(dx, dy, dz)
+                  for dx in (-1, 0, 1)
+                  for dy in (-1, 0, 1)
+                  for dz in (-1, 0, 1)]
+
+    imesh = np.mod(imesh, ng)  # periodic
+
+    flat = field.ravel()
+    stride_y, stride_x = ng, ng * ng
+
+    for dx, dy, dz in shifts:
+        idx_x = (imesh[0] + dx) % ng
+        idx_y = (imesh[1] + dy) % ng
+        idx_z = (imesh[2] + dz) % ng
+        flat_idx = (idx_x * stride_x + idx_y * stride_y + idx_z).astype(np.int64)
+
+        # weight per particle --------------------------------
+        if window_order == 1:
+            w_shift = weight
+        elif window_order == 2:
+            w_shift = (
+                np.where(dx == 0, 1.0 - fmesh[0], fmesh[0]) *
+                np.where(dy == 0, 1.0 - fmesh[1], fmesh[1]) *
+                np.where(dz == 0, 1.0 - fmesh[2], fmesh[2]) * weight)
+        else:
+            def w_axis(f, d):
+                return np.where(d == 0,
+                                0.75 - f ** 2,
+                                0.5 * (f ** 2 + d * f + 0.25))
+            w_shift = w_axis(fmesh[0], dx) * w_axis(fmesh[1], dy) * w_axis(fmesh[2], dz) * weight
+
+        np.add.at(flat, flat_idx, w_shift.astype(field.dtype))
+
+    return flat.reshape(field.shape)
+
+
+# -----------------------------------------------------------------------------
+# k‑vector & deconvolution window
+# -----------------------------------------------------------------------------
+
+def _rfftn_kvec(shape: Tuple[int, int, int], boxsize: float, dtype=float):
+    spacing = boxsize / (2.0 * np.pi) / shape[-1]
+    freqs = [np.fft.fftfreq(n, d=spacing) for n in shape[:-1]]
+    freqs.append(np.fft.rfftfreq(shape[-1], d=spacing))
+    kvec_grid = np.meshgrid(*freqs, indexing="ij")
+    return np.stack(kvec_grid, axis=0).astype(dtype)
+
+
+def _deconvolve(kvec, boxsize: float, window_order: int):
+    ng = kvec.shape[1]
+    nvec = kvec * (boxsize / (2.0 * np.pi))
+    sinc_vals = np.sinc(nvec / ng)
+    sinc_vals = np.where(sinc_vals == 0.0, 1.0, sinc_vals)
+    window_ft = np.prod(sinc_vals, axis=0)
+    wk = np.where(window_ft == 0.0, 0.0, 1.0 / window_ft)
+    return wk ** window_order
