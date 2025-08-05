@@ -1,11 +1,11 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="nbody_utils",
+    name="lss_utils",
     version="0.1.0",
     description="Utility routines for analyzing N-body data",
-    author="Your Name",
-    url="https://github.com/kazakitsu/nbody_utils",
+    author="Kazuyuki Akitsu",
+    url="https://github.com/kazakitsu/lss_utils",
     packages=find_packages(),
     install_requires=[
         "numpy>=1.20",
