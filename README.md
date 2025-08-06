@@ -21,15 +21,32 @@ Utilities and scripts to analyze N-body simulation data, with both NumPy and JAX
 ## Prerequisites
 
 - **Python ≥ 3.7**
-- **pip**  
-- **(For GPU/TPU acceleration)** Install JAX _before_ installing **lss_utils**, following the official instructions:
+- **(For GPU/TPU acceleration)** Install JAX _before_ installing **lss_utils**, following the official instructions: https://github.com/jax-ml/jax#installation
 
   ```bash
   # CPU-only
   pip install --upgrade pip
   pip install --upgrade "jax[cpu]"
 
-  # GPU (CUDA 11.x) example
+  # GPU (CUDA 12.x) example
   pip install --upgrade pip
-  pip install --upgrade "jax[cuda11_local]" \
+  pip install --upgrade "jax[cuda12]" \
     -f https://storage.googleapis.com/jax-releases/jax_releases.html
+
+
+## Installation
+
+Once prerequisites are met, install **lss_utils** with pip:
+
+```bash
+git clone https://github.com/kazakitsu/lss_utils.git
+cd lss_utils
+pip install .
+
+
+If you want to work on or modify the code locally:
+```bash
+
+git clone https://github.com/kazakitsu/lss_utils.git
+cd lss_utils
+pip install -e .
