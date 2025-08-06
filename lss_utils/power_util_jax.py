@@ -4,6 +4,10 @@ import jax.numpy as jnp
 from jax import jit, vmap, lax
 from functools import partial
 
+# ------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------
+
 @partial(jit, static_argnames=('shape', 'dtype'))
 def rfftn_kvec(shape, boxsize, dtype=float):
     """
@@ -23,6 +27,11 @@ def rfftn_kvec(shape, boxsize, dtype=float):
     # Stack the coordinate arrays to get the final (D, N1, N2, ...) shape.
     kvec = jnp.stack(kvec_grid, axis=0)
     return kvec.astype(dtype)
+
+
+# ------------------------------------------------------------
+# P(k) estimator
+# ------------------------------------------------------------
 
 class Measure_Pk:
     def __init__(self, boxsize, ng, kbin_edges, ell_max=0, leg_fac=True):
@@ -115,6 +124,11 @@ class Measure_Pk:
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
         
         return self._compute(Pk1d, mask)
+
+
+# ------------------------------------------------------------
+# P(k) & B(k) estimator (FFT method)
+# ------------------------------------------------------------
 
 
 class Measure_spectra_FFT:

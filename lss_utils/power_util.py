@@ -117,8 +117,6 @@ class Measure_Pk:
 # ------------------------------------------------------------
 # P(k) & B(k) estimator (FFT method)
 # ------------------------------------------------------------
-import numpy as np
-
 
 class Measure_spectra_FFT:
     """
