@@ -42,7 +42,7 @@ Once prerequisites are met, install **lss_utils** with pip:
 git clone https://github.com/kazakitsu/lss_utils.git
 cd lss_utils
 pip install .
-
+```
 
 If you want to work on or modify the code locally:
 ```bash
@@ -50,3 +50,4 @@ If you want to work on or modify the code locally:
 git clone https://github.com/kazakitsu/lss_utils.git
 cd lss_utils
 pip install -e .
+```
