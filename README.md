@@ -8,8 +8,8 @@ Utilities and scripts to analyze N-body simulation data, with both NumPy and JAX
 
 - **Mesh assignment**  
   Assign particle data to a regular grid (CIC, TSC, NGP, …) via `Mesh_Assignment`.
-- **Power-spectrum & spectra measurement**  
-  Compute 1D power spectra and bispectra efficiently via FFTs (`Measure_Pk`, `Measure_spectra_FFT`).
+- **Power-spectrum & bispectra measurement**  
+  Compute 1D/2D power spectra and 1D bispectra efficiently via FFTs (`Measure_Pk`, `Measure_spectra_FFT`).
 - **Dual backend**  
   - **JAX** implementations for GPU/TPU acceleration  
   - Fallback to pure-NumPy if JAX is not available
