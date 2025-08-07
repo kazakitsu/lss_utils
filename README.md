@@ -25,13 +25,10 @@ Utilities and scripts to analyze N-body simulation data, with both NumPy and JAX
 
   ```bash
   # CPU-only
-  pip install --upgrade pip
-  pip install --upgrade "jax[cpu]"
+  pip install -U jax
 
   # GPU (CUDA 12.x) example
-  pip install --upgrade pip
-  pip install --upgrade "jax[cuda12]" \
-    -f https://storage.googleapis.com/jax-releases/jax_releases.html
+  pip install -U jax[cuda12]
 
 
 ## Installation
