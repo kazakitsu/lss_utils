@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import jax.numpy as jnp
-from jax import jit, vmap, lax
+from jax import jit, vmap, lax, ops
 from functools import partial
 
 # ------------------------------------------------------------
@@ -58,19 +58,23 @@ class Measure_Pk:
         self.Nk_1d = Nk.ravel()
 
         # mean k and total counts per bin
-        k_tot = jnp.bincount(self.kidx, 
-                             weights=self.kmag_1d * self.Nk_1d,
-                             length=self.num_bins+2)[1:-1]
-        N_tot = jnp.bincount(self.kidx, 
-                             weights=self.Nk_1d,
-                             length=self.num_bins+2)[1:-1]
+        #k_tot = jnp.bincount(self.kidx, 
+        #                     weights=self.kmag_1d * self.Nk_1d,
+        #                     length=self.num_bins+2)[1:-1]
+        #N_tot = jnp.bincount(self.kidx, 
+        #                     weights=self.Nk_1d,
+        #                     length=self.num_bins+2)[1:-1]
+        
+        k_tot = ops.segment_sum(self.kmag_1d * self.Nk_1d,
+                                self.kidx, self.num_bins + 2)[1:-1]
+        N_tot = ops.segment_sum(self.Nk_1d,
+                                self.kidx, self.num_bins + 2)[1:-1]
         
         self.k_mean = k_tot / jnp.maximum(N_tot, 1)
         self.Nk = N_tot
 
         # precompute mu^2 per mode
-        mu2 = jnp.where(k_is_zero, 0.0, kvec[2]**2 / k2)
-        self.mu2_1d = mu2.ravel()
+        self.mu2_1d = jnp.where(k_is_zero, 0.0, kvec[2]**2 / k2).ravel()
 
         # build Legendre factors for monopole/quadrupole/etc.
         self.leg_fac = leg_fac
@@ -93,14 +97,24 @@ class Measure_Pk:
         mu_mean = jnp.sum(self.mu2_1d * mask * self.Nk_1d) / jnp.sum(mask * self.Nk_1d)
         return mu_mean
 
-    def _compute(self, Pk1d, mask):
+    def _compute(self, Pk1d, mask, use_pre):
         # apply mask and weights
         w_P = (Pk1d * mask * self.Nk_1d).real
-        w_N = self.Nk_1d * mask
+        #w_N = self.Nk_1d * mask
 
-        P_sum = jnp.bincount(self.kidx, weights=w_P, length=self.num_bins + 2)[1:-1]
-        N_sum = jnp.bincount(self.kidx, weights=w_N, length=self.num_bins + 2)[1:-1]
+        #P_sum = jnp.bincount(self.kidx, weights=w_P, length=self.num_bins + 2)[1:-1]
+        #N_sum = jnp.bincount(self.kidx, weights=w_N, length=self.num_bins + 2)[1:-1]
 
+        P_sum = ops.segment_sum(w_P, self.kidx, self.num_bins + 2)[1:-1]
+        #N_sum = ops.segment_sum(w_N, self.kidx, self.num_bins + 2)[1:-1]
+
+        def _use_saved(_):
+            return self.Nk
+        def _recount(_):
+            return ops.segment_sum(self.Nk_1d * mask,
+                                   self.kidx, self.num_bins + 2)[1:-1]
+
+        N_sum = lax.cond(use_pre, _use_saved, _recount, operand=None)
         Pk_binned = jnp.where(N_sum > 0, P_sum / N_sum, 0.0)
 
         return jnp.array([self.k_mean, Pk_binned * self.vol, N_sum]).T
@@ -122,8 +136,11 @@ class Measure_Pk:
 
         # Create mask based on the mu range
         mask = (self.mu2_1d >= mu_min**2) & (self.mu2_1d <= mu_max**2)
+
+        use_pre = jnp.logical_and(jnp.equal(mu_min, 0.0),
+                                  jnp.equal(mu_max, 1.0))
         
-        return self._compute(Pk1d, mask)
+        return self._compute(Pk1d, mask, use_pre)
 
 
 # ------------------------------------------------------------
