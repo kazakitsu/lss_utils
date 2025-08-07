@@ -6,8 +6,7 @@ setup(
     description="Utility routines for analyzing N-body data",
     author="Kazuyuki Akitsu",
     url="https://github.com/kazakitsu/lss_utils",
-    package_dir={"": "lss_utils"},
-    packages=find_packages(where='lss_utils'),
+    packages=find_packages(),
     install_requires=[
         "numpy>=1.20",
     ],
