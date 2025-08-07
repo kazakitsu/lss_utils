@@ -8,8 +8,8 @@ Utilities and scripts to analyze N-body simulation data, with both NumPy and JAX
 
 - **Mesh assignment**  
   Assign particle data to a regular grid (CIC, TSC, NGP, …) via `Mesh_Assignment`.
-- **Power-spectrum & bispectra measurement**  
-  Compute 1D/2D power spectra and 1D bispectra efficiently via FFTs (`Measure_Pk`, `Measure_spectra_FFT`).
+- **Power spectrum & bispectrum measurement**  
+  Compute 1D/2D power spectrum and 1D bispectrum efficiently via FFTs (`Measure_Pk`, `Measure_spectra_FFT`).
 - **Dual backend**  
   - **JAX** implementations for GPU/TPU acceleration  
   - Fallback to pure-NumPy if JAX is not available
@@ -46,7 +46,6 @@ pip install .
 
 If you want to work on or modify the code locally:
 ```bash
-
 git clone https://github.com/kazakitsu/lss_utils.git
 cd lss_utils
 pip install -e .
