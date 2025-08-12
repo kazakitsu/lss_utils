@@ -354,9 +354,14 @@ class Measure_spectra_FFT:
             return self._tri_cache[key]
 
         # all-same or all-different -> unique i<=j<=k
-        if self._tri_cache["unique"] is None:
-            self._tri_cache["unique"] = self._build_tri_unique()
-        return self._tri_cache["unique"]
+        if same12 and same23:
+            if self._tri_cache["unique"] is None:
+                self._tri_cache["unique"] = self._build_tri_unique()
+            return self._tri_cache["unique"]
+        else: 
+            if self._tri_cache["all"] is None:
+                self._tri_cache["all"] = self._build_tri_all()
+            return self._tri_cache["all"]
 
     # ---------------------------------------------------------------------
     # helpers: build stacks for a list of bins
