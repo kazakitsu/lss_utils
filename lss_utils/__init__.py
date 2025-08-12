@@ -1,6 +1,6 @@
 # lss_utils/__init__.py
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 try:
     import jax.numpy 
@@ -10,14 +10,13 @@ except ImportError:
 
 if use_jax:
     from .assign_util_jax import Mesh_Assignment
-    from .power_util_jax import rfftn_kvec, Measure_Pk, Measure_spectra_FFT
+    from .power_util_jax import Measure_Pk, Measure_spectra_FFT
 else:
     from .assign_util import Mesh_Assignment
-    from .power_util import rfftn_kvec, Measure_Pk, Measure_spectra_FFT
+    from .power_util import Measure_Pk, Measure_spectra_FFT
 
 __all__ = [
     "Mesh_Assignment",
-    "rfftn_kvec",
     "Measure_Pk",
     "Measure_spectra_FFT",
 ]
