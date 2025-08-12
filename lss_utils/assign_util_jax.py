@@ -95,6 +95,35 @@ class Mesh_Assignment:
         if self.normalize:
             field_k = field_k.at[0, 0, 0].set(0.0)
         return field_k
+    
+    # for PT model
+    @partial(jit, static_argnames=('self',))
+    def fft_deconvolve_batched(self, fields_r, fields_r_i=None):
+        """
+        fields_r:   (m, ng, ng, ng) real
+        fields_r_i: (m, ng, ng, ng) real or None
+        return:     (m, ng, ng, ng//2+1) complex
+        """
+        field_r = fields_r.astype(self.real_dtype)
+        field_k = jnp.fft.rfftn(field_r, axes=(-3, -2, -1), norm='forward').astype(self.complex_dtype)
+
+        if fields_r_i is not None:
+            field_r_i = fields_r_i.astype(self.real_dtype)
+            field_k_i = jnp.fft.rfftn(field_r_i, axes=(-3, -2, -1), norm='forward').astype(self.complex_dtype)
+            # interlacing phase
+            field_k_i = field_k_i * self.phase_x_1d[None, :, None, None]
+            field_k_i = field_k_i * self.phase_x_1d[None, None, :, None]
+            field_k_i = field_k_i * self.phase_z_1d[None, None, None, :]
+            field_k = 0.5 * (field_k + field_k_i)
+
+        # deconv
+        field_k = field_k * self.wx[None, :, None, None]
+        field_k = field_k * self.wy[None, None, :, None]
+        field_k = field_k * self.wz[None, None, None, :]
+
+        if self.normalize:
+            field_k = field_k.at[:, 0, 0, 0].set(0.0)
+        return field_k
 
     def assign_to_grid(self,
                        pos,
@@ -175,7 +204,7 @@ class Mesh_Assignment:
 
         # kernel choice (auto prefers fused; now safe by construction)
         updates_per_slab = shifts * ng_L * ng_L * slab
-        
+
         if neighbor_mode == "fused":
             use_fused = True
         elif neighbor_mode == "scan":
