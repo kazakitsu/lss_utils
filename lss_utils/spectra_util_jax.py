@@ -388,6 +388,8 @@ class Measure_spectra_FFT:
         if fieldk2 is None:
             fieldk2 = fieldk1
 
+        norm = jnp.asarray(self.ng, dtype=self.dtype) ** 3
+
         if mode == "speed":
             if not self._skip_prepare:
                 self._prepare_cache(fieldk1, fieldk2, None, mode="speed")
@@ -397,7 +399,7 @@ class Measure_spectra_FFT:
             num = jnp.sum(I1 * I2, axis=(1, 2, 3))
             den = jnp.sum(N  * N,  axis=(1, 2, 3))
             P   = jnp.where(den > 0, num / den, 0.0)
-            return jnp.stack([self.kbin_centers, (P * self.vol).real, den], axis=1).astype(self.dtype)
+            return jnp.stack([self.kbin_centers, (P * self.vol).real, den/norm], axis=1).astype(self.dtype)
 
         elif mode == "chunked":
             if bin_chunk is None or bin_chunk <= 0:
@@ -413,7 +415,7 @@ class Measure_spectra_FFT:
                 num = jnp.sum(I1 * I2, axis=(1, 2, 3))
                 den = jnp.sum(N  * N,  axis=(1, 2, 3))
                 P   = jnp.where(den > 0, num / den, 0.0)
-                rows.append(jnp.stack([self.kbin_centers[bins], (P * self.vol).real, den], axis=1))
+                rows.append(jnp.stack([self.kbin_centers[bins], (P * self.vol).real, den/norm], axis=1))
             return jnp.concatenate(rows, axis=0).astype(self.dtype)
 
         else:  # low_mem
@@ -428,7 +430,7 @@ class Measure_spectra_FFT:
                 num = jnp.sum(I1 * I2)
                 den = jnp.sum(N  * N)
                 P   = jnp.where(den > 0, num / den, 0.0)
-                return jnp.stack([ self.kbin_centers[i], (P * self.vol).real, den ], axis=0).astype(self.dtype)
+                return jnp.stack([ self.kbin_centers[i], (P * self.vol).real, den/norm], axis=0).astype(self.dtype)
 
             LMAP_CHUNK = 256
             rows = []
@@ -491,6 +493,8 @@ class Measure_spectra_FFT:
         tag2 = "f1" if same12 else "f2"
         tag3 = "f1" if same13 else ("f2" if same23 else "f3")
 
+        norm = jnp.asarray(self.ng, dtype=self.dtype) ** 3
+
         if mode == "speed":
             if not self._skip_prepare:
                 self._prepare_cache(fieldk1, fieldk2, fieldk3, mode="speed")
@@ -508,7 +512,7 @@ class Measure_spectra_FFT:
                                    self.kbin_centers[j],
                                    self.kbin_centers[k],
                                    (B * (self.vol**2)).real,
-                                   den ], axis=0).astype(self.dtype)
+                                   den / norm ], axis=0).astype(self.dtype)
 
             return lax.map(one_triangle, tri)
 
@@ -595,7 +599,7 @@ class Measure_spectra_FFT:
                                                self.kbin_centers[gj],
                                                self.kbin_centers[gk],
                                                (Bv * (self.vol**2)).real,
-                                               den ], axis=0).astype(self.dtype)
+                                               den / norm ], axis=0).astype(self.dtype)
 
                         local_triples = jnp.stack([li, lj, lk], axis=1)
                         rows = lax.map(one_row, local_triples)
@@ -677,7 +681,7 @@ class Measure_spectra_FFT:
                     self.kbin_centers[j],
                     self.kbin_centers[k],
                     (B * (self.vol**2)).real,
-                    den
+                    den / norm
                 ], axis=0).astype(self.dtype)
 
             # Chunk over triangles to keep compile time moderate

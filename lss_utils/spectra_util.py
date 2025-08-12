@@ -433,6 +433,8 @@ class Measure_spectra_FFT:
         if fieldk2 is None:
             fieldk2 = fieldk1
 
+        norm = np.asarray(self.ng, dtype=self.dtype) ** 3
+
         if mode == "speed":
             if not self._skip_prepare:
                 self._prepare_cache(fieldk1, fieldk2, None, mode="speed")
@@ -442,7 +444,7 @@ class Measure_spectra_FFT:
             num = np.sum(I1 * I2, axis=(1, 2, 3))
             den = np.sum(N * N, axis=(1, 2, 3))
             P = np.where(den > 0, num / den, 0.0)
-            return np.stack([self.kbin_centers, (P * self.vol).real, den], axis=1).astype(self.dtype)
+            return np.stack([self.kbin_centers, (P * self.vol).real, den/norm], axis=1).astype(self.dtype)
 
         elif mode == "chunked":
             if bin_chunk is None or bin_chunk <= 0:
@@ -458,7 +460,7 @@ class Measure_spectra_FFT:
                 num = np.sum(I1 * I2, axis=(1, 2, 3))
                 den = np.sum(N * N, axis=(1, 2, 3))
                 P = np.where(den > 0, num / den, 0.0)
-                rows.append(np.stack([self.kbin_centers[bins], (P * self.vol).real, den], axis=1))
+                rows.append(np.stack([self.kbin_centers[bins], (P * self.vol).real, den/norm], axis=1))
             return np.concatenate(rows, axis=0).astype(self.dtype)
 
         else:  # low_mem
@@ -472,7 +474,7 @@ class Measure_spectra_FFT:
                 num = np.sum(I1 * I2)
                 den = np.sum(N * N)
                 P = (num / den) if (den > 0) else 0.0
-                out_rows.append(np.array([self.kbin_centers[i], (P * self.vol).real, den], dtype=self.dtype))
+                out_rows.append(np.array([self.kbin_centers[i], (P * self.vol).real, den/norm], dtype=self.dtype))
             return np.stack(out_rows, axis=0)
 
     # ---------------------------------------------------------------------
@@ -506,6 +508,8 @@ class Measure_spectra_FFT:
         tag2 = "f1" if same12 else "f2"
         tag3 = "f1" if same13 else ("f2" if same23 else "f3")
 
+        norm = np.asarray(self.ng, dtype=self.dtype) ** 3
+
         if mode == "speed":
             if not self._skip_prepare:
                 self._prepare_cache(fieldk1, fieldk2, fieldk3, mode="speed")
@@ -527,7 +531,7 @@ class Measure_spectra_FFT:
                                           self.kbin_centers[j],
                                           self.kbin_centers[k],
                                           (Bv * (self.vol ** 2)).real,
-                                          den], dtype=self.dtype))
+                                          den / norm], dtype=self.dtype))
             return np.stack(out_rows, axis=0)
 
         elif mode == "chunked":
@@ -654,7 +658,7 @@ class Measure_spectra_FFT:
                                           self.kbin_centers[gj],
                                           self.kbin_centers[gk],
                                           (Bv * (self.vol ** 2)).real,
-                                          den], dtype=self.dtype))
+                                          den / norm], dtype=self.dtype))
                 rows_all.append(np.stack(rows, axis=0))
                 idx_all.append(idx)
 
@@ -703,7 +707,7 @@ class Measure_spectra_FFT:
                                       self.kbin_centers[j],
                                       self.kbin_centers[k],
                                       (Bv * (self.vol ** 2)).real,
-                                      den], dtype=self.dtype))
+                                      den / norm], dtype=self.dtype))
             return np.stack(rows, axis=0)
 
     # ---------------------------------------------------------------------
