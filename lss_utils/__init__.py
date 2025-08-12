@@ -10,10 +10,10 @@ except ImportError:
 
 if use_jax:
     from .assign_util_jax import Mesh_Assignment
-    from .power_util_jax import Measure_Pk, Measure_spectra_FFT
+    from .spectra_util_jax import Measure_Pk, Measure_spectra_FFT
 else:
     from .assign_util import Mesh_Assignment
-    from .power_util import Measure_Pk, Measure_spectra_FFT
+    from .spectra_util import Measure_Pk, Measure_spectra_FFT
 
 __all__ = [
     "Mesh_Assignment",
