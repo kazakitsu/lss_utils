@@ -8,13 +8,13 @@ setup(
     url="https://github.com/kazakitsu/lss_utils",
     packages=find_packages(),
     install_requires=[
-        "numpy>=1.20",
+        "numpy>=2.1",
     ],
     extras_require={
         "jax": [
-            "jax>=0.4.0",
-            "jaxlib>=0.4.0",
+            "jax>=0.4.3",
+            "jaxlib>=0.4.3",
         ],
     },
-    python_requires=">=3.7",
+    python_requires=">=3.10",
 )
