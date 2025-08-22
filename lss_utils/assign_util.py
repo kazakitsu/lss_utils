@@ -127,7 +127,7 @@ class Mesh_Assignment:
         else:
             use_fused = (updates_per_chunk <= int(fuse_updates_threshold))
 
-        print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {num_p} particles", file=sys.stderr)
+        #print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {num_p} particles", file=sys.stderr)
         single_assign_fn = self._assign_fused if use_fused else self._assign_scan
 
         # no need for strict padding in NumPy; slice last chunk length directly
@@ -172,7 +172,7 @@ class Mesh_Assignment:
         else:
             use_fused = (updates_per_slab <= int(fuse_updates_threshold))
 
-        print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {ng_L}^3 particles", file=sys.stderr)
+        #print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {ng_L}^3 particles", file=sys.stderr)
         single_assign_fn = self._assign_fused if use_fused else self._assign_scan
 
         field0 = np.zeros((self.ng, ) * 3, dtype=self.real_dtype)

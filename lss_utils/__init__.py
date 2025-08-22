@@ -11,6 +11,7 @@ except ImportError:
 if use_jax:
     from .assign_util_jax import Mesh_Assignment
     from .spectra_util_jax import Measure_Pk, Measure_spectra_FFT
+    from .tensor_utils_jax import kaxes_1d, project_rank2_to_helicity
 else:
     from .assign_util import Mesh_Assignment
     from .spectra_util import Measure_Pk, Measure_spectra_FFT
@@ -19,4 +20,6 @@ __all__ = [
     "Mesh_Assignment",
     "Measure_Pk",
     "Measure_spectra_FFT",
+    "kaxes_1d",
+    "project_rank2_to_helicity",
 ]

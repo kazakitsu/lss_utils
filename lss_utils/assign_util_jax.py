@@ -22,7 +22,7 @@ class Mesh_Assignment:
         *,
         interlace: bool = False,
         normalize: bool = True,
-        max_scatter_indices: int = 800_000_000,
+        max_scatter_indices: int = 200_000_000,
         dtype=jnp.float32,
     ):
         self.boxsize = float(boxsize)
@@ -61,7 +61,7 @@ class Mesh_Assignment:
         self._assign_fused = jit(partial(_single_assign_fused, ng=self.ng, window_order=self.window_order))
 
     # -------- public API -------- #
-    def assign_fft(self, pos, weight=1.0, *, neighbor_mode: str="auto", fuse_updates_threshold: int=500_000_000):
+    def assign_fft(self, pos, weight=1.0, *, neighbor_mode: str="auto", fuse_updates_threshold: int=100_000_000):
         pos = jnp.asarray(pos, dtype=self.real_dtype)
         weight = jnp.asarray(weight, dtype=self.real_dtype)
         field_r = self.assign_to_grid(pos, weight,
@@ -132,7 +132,7 @@ class Mesh_Assignment:
                        interlace: bool=False,
                        normalize_mean: bool=True,
                        neighbor_mode: str="auto",
-                       fuse_updates_threshold: int=500_000_000):
+                       fuse_updates_threshold: int=100_000_000):
         """Host wrapper: decide chunking and kernel, then call jitted inner."""
         pos = jnp.asarray(pos, dtype=self.real_dtype)
         weight = jnp.asarray(weight, dtype=self.real_dtype)
@@ -158,7 +158,7 @@ class Mesh_Assignment:
         else:  # "auto"
             use_fused = (updates_per_chunk <= int(fuse_updates_threshold))
 
-        print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {num_p} particles ", file=sys.stderr)
+        #print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {num_p} particles ", file=sys.stderr)
         single_assign_fn = self._assign_fused if use_fused else self._assign_scan
 
         pad = (-num_p) % chunk_size
@@ -185,7 +185,7 @@ class Mesh_Assignment:
                                  interlace: bool=False,
                                  normalize_mean: bool=True,
                                  neighbor_mode: str="auto",
-                                 fuse_updates_threshold: int=500_000_000):
+                                 fuse_updates_threshold: int=100_000_000):
         """Host wrapper for slabbed displacement scattering."""
         disp_r = jnp.asarray(disp_r, dtype=self.real_dtype)
         weight = jnp.asarray(weight, dtype=self.real_dtype)
@@ -212,7 +212,7 @@ class Mesh_Assignment:
         else:
             use_fused = (updates_per_slab <= int(fuse_updates_threshold))
 
-        print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {ng_L}^3 particles ", file=sys.stderr)
+        #print(f"Using {'fused' if use_fused else 'scan'} neighbor updates for {ng_L}^3 particles ", file=sys.stderr)
         single_assign_fn = self._assign_fused if use_fused else self._assign_scan
 
         field0 = jnp.zeros((self.ng, )*3, dtype=self.real_dtype)
