@@ -43,7 +43,7 @@ def _trace_S(S6):
 
 # ------------------------------------------------------------
 # Public API
-def project_rank2_to_helicity(
+def project_rank2_helicity(
     S6, kx, ky, kz, *,
     mode: str = "speed",     # "speed" or "low_mem"
     chunk_z: int = 64,       # used when mode == "low_mem"

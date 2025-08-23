@@ -7,9 +7,11 @@ Utilities and scripts for analyzing N-body simulation data, with both NumPy and 
 ## Features
 
 - **Mesh assignment**  
-  Assign particle data to a regular grid (NGP, CIC, TSC) using `Mesh_Assignment`.
+  Assign particle data (with arbitrary mass) to a regular grid (NGP, CIC, TSC) using `Mesh_Assignment`.
 - **Power spectrum & bispectrum measurement**  
   Compute the 1D/2D power spectrum and the 1D bispectrum efficiently using FFTs (`Measure_Pk`, `Measure_spectra_FFT`).
+- **Helicity decomposition**  
+  Project symmetric rank-2 tensor fields to the helicity basis (`project_rank2_helicity`).
 - **Dual backend**  
   - **JAX** implementations for GPU/TPU acceleration  
   - Fallback to pure NumPy if JAX is not available
