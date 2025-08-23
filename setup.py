@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="lss_utils",
-    version="0.2.0",
+    version="0.3.0",
     description="Utility routines for analyzing N-body data",
     author="Kazuyuki Akitsu",
     url="https://github.com/kazakitsu/lss_utils",

@@ -1,6 +1,6 @@
 # lss_utils/__init__.py
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 try:
     import jax.numpy 
@@ -15,6 +15,7 @@ if use_jax:
 else:
     from .assign_util import Mesh_Assignment
     from .spectra_util import Measure_Pk, Measure_spectra_FFT
+    from .tensor_utils import kaxes_1d, project_rank2_to_helicity
 
 __all__ = [
     "Mesh_Assignment",
