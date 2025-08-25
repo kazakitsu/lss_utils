@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+from typing import Optional
+
 import jax.numpy as jnp
 from jax import jit, lax
 from functools import partial
@@ -61,16 +63,21 @@ class Mesh_Assignment:
         self._assign_fused = jit(partial(_single_assign_fused, ng=self.ng, window_order=self.window_order))
 
     # -------- public API -------- #
-    def assign_fft(self, pos, weight=1.0, *, neighbor_mode: str="auto", fuse_updates_threshold: int=100_000_000):
+    def assign_fft(self, pos, weight=1.0, *, normalize_mean: bool=True, norm: Optional[float] = None, 
+                   neighbor_mode: str="auto", fuse_updates_threshold: int=100_000_000):
         pos = jnp.asarray(pos, dtype=self.real_dtype)
         weight = jnp.asarray(weight, dtype=self.real_dtype)
         field_r = self.assign_to_grid(pos, weight,
                                       interlace=False,
+                                      normalize_mean=normalize_mean,
+                                      norm=norm,
                                       neighbor_mode=neighbor_mode,
                                       fuse_updates_threshold=fuse_updates_threshold)
         if self.interlace:
             field_r_i = self.assign_to_grid(pos, weight,
                                             interlace=True,
+                                            normalize_mean=normalize_mean,
+                                            norm=norm,
                                             neighbor_mode=neighbor_mode,
                                             fuse_updates_threshold=fuse_updates_threshold)
             return self.fft_deconvolve(field_r, field_r_i)
@@ -131,6 +138,7 @@ class Mesh_Assignment:
                        *,
                        interlace: bool=False,
                        normalize_mean: bool=True,
+                       norm: Optional[float] = None,
                        neighbor_mode: str="auto",
                        fuse_updates_threshold: int=100_000_000):
         """Host wrapper: decide chunking and kernel, then call jitted inner."""
@@ -174,7 +182,7 @@ class Mesh_Assignment:
 
         return _assign_to_grid(field0, pos_pad, wt_pad, self.cell, num_p,
                                self.ng, self.window_order,
-                               interlace, normalize_mean,
+                               interlace, normalize_mean, norm,
                                int(n_chunks), int(chunk_size),
                                single_assign_fn)
 
@@ -184,6 +192,7 @@ class Mesh_Assignment:
                                  *,
                                  interlace: bool=False,
                                  normalize_mean: bool=True,
+                                 norm: Optional[float] = None,
                                  neighbor_mode: str="auto",
                                  fuse_updates_threshold: int=100_000_000):
         """Host wrapper for slabbed displacement scattering."""
@@ -220,11 +229,12 @@ class Mesh_Assignment:
                                                  disp_r, weight, self.cell,
                                                  self.ng, self.window_order, int(slab),
                                                  interlace, single_assign_fn)
-        if normalize_mean:
+        if normalize_mean :
             ng = jnp.asarray(self.ng, dtype=self.real_dtype)
-            norm = ng**3
-            n_particles = jnp.asarray(ng_L, dtype=self.real_dtype) ** 3
-            field_r = field_r * (norm / n_particles)
+            norm_grid = ng**3
+            if norm is None:
+                norm = jnp.asarray(ng_L, dtype=self.real_dtype) ** 3 ### number of particles
+            field_r = field_r * (norm_grid / norm)
         return field_r
 
     def assign_from_disp_fft(self, disp_r, weight, **kwargs):
@@ -360,12 +370,12 @@ def _single_assign_fused(field, pos_mesh, weight, *, ng: int, window_order: int)
 
 # ---------- jitted inners (chunk/slab loops) ----------
 @partial(jit, static_argnames=('ng','window_order','interlace',
-                               'normalize','n_chunks','chunk_size',
+                               'normalize_mean', 'norm', 'n_chunks','chunk_size',
                                'single_assign_fn'),
          )
 def _assign_to_grid(field, pos_pad, wt_pad, cell, num_p,
                     ng: int, window_order: int,
-                    interlace: bool, normalize: bool,
+                    interlace: bool, normalize_mean: bool, norm: Optional[float],
                     n_chunks: int, chunk_size: int,
                     single_assign_fn):
     """Chunk over particles"""
@@ -391,10 +401,12 @@ def _assign_to_grid(field, pos_pad, wt_pad, cell, num_p,
 
     field = lax.fori_loop(0, n_chunks, body, field)
 
-    if normalize:
+    if normalize_mean:
         ngf = jnp.asarray(ng, dtype=fdtype)
-        norm = ngf**3
-        field = field * (norm / num_p)
+        norm_grid = ngf**3
+        if norm is None:
+            norm = num_p
+        field = field * (norm_grid / norm)
     return field
 
 @partial(jit, static_argnames=('ng','window_order','slab','interlace','single_assign_fn'),
