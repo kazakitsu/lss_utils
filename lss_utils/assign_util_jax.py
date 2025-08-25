@@ -370,7 +370,7 @@ def _single_assign_fused(field, pos_mesh, weight, *, ng: int, window_order: int)
 
 # ---------- jitted inners (chunk/slab loops) ----------
 @partial(jit, static_argnames=('ng','window_order','interlace',
-                               'normalize_mean', 'norm', 'n_chunks','chunk_size',
+                               'normalize_mean', 'n_chunks','chunk_size',
                                'single_assign_fn'),
          )
 def _assign_to_grid(field, pos_pad, wt_pad, cell, num_p,
