@@ -24,7 +24,8 @@ def _k1d(ng: int, boxsize: float, *, dtype):
 # ------------------------------------------------------------
 
 class Measure_Pk:
-    def __init__(self, boxsize, ng, kbin_edges, ell_max=0, leg_fac=True, *, dtype=jnp.float32):
+    def __init__(self, boxsize, ng, kbin_edges, ell_max=0, leg_fac=True, LOS=(0.0, 0.0, 1.0), 
+                 *, dtype=jnp.float32):
         """Memory-savvy P(k): precompute only 1D/2D k-structures and stream over kz-planes."""
         self.boxsize = jnp.asarray(boxsize, dtype)
         self.kbin_edges = jnp.asarray(kbin_edges, dtype=dtype)
@@ -37,15 +38,24 @@ class Measure_Pk:
 
         # 1D k and squared
         kx, ky, kz = _k1d(self.ng, self.boxsize, dtype=self.dtype)
+        self.kx = kx.astype(self.dtype)
+        self.ky = ky.astype(self.dtype)
+        self.kz = kz.astype(self.dtype)
+        
         self.kx2 = (kx * kx).astype(self.dtype)
         self.ky2 = (ky * ky).astype(self.dtype)
         self.kz2 = (kz * kz).astype(self.dtype)
 
         # 2D kxy^2 reused across all kz-planes (memory ~ ng^2)
-        self.kxy2 = (self.kx2[:, None] + self.ky2[None, :]).astype(self.dtype)  # (ng, ng)
+        self.kxy2 = ((self.kx*self.kx)[:, None] + (self.ky*self.ky)[None, :]).astype(self.dtype)  # (ng, ng)
+
+        # Default LOS (normalized)
+        LOS_arr = jnp.asarray(LOS, dtype=self.dtype)
+        LOS_arr = LOS_arr / jnp.linalg.norm(LOS_arr)
+        self.LOS = LOS_arr  # shape (3,)
 
         # Bin centers
-        self.kbin_centers = 0.5 * (self.kbin_edges[1:] + self.kbin_edges[:-1])
+        #self.kbin_centers = 0.5 * (self.kbin_edges[1:] + self.kbin_edges[:-1])
 
         # Precompute mean-k and counts via streaming over kz planes
         self.k_mean, self.Nk = self._precompute_bin_stats()
@@ -82,8 +92,8 @@ class Measure_Pk:
         k_mean = jnp.where(n_sum > 0, k_sum / n_sum, 0.0)
         return k_mean, n_sum
 
-    @partial(jit, static_argnames=('self', 'ell'))
-    def __call__(self, fieldk1, fieldk2=None, ell=0, mu_min=0.0, mu_max=1.0):
+    @partial(jit, static_argnames=('self', 'ell', 'ignore_zero'))
+    def __call__(self, fieldk1, fieldk2=None, ell=0, mu_min=0.0, mu_max=1.0, LOS=None, ignore_zero=False, zero_tol=0.0):
         """
         Compute auto/cross P(k) for multipole ell (0,2,4,...) and mu-range.
         Streams over kz-planes; avoids 3D kmag storage.
@@ -100,6 +110,9 @@ class Measure_Pk:
         num_bins = self.num_bins
         kxy2 = self.kxy2
         kz2 = self.kz2
+        kx = self.kx
+        ky = self.ky
+        kz = self.kz
 
         ell = int(ell)
         if ell % 2 != 0 or ell < 0 or ell > self.ell_max:
@@ -108,6 +121,14 @@ class Measure_Pk:
 
         mu2_min = jnp.asarray(mu_min**2, dtype=dtype)
         mu2_max = jnp.asarray(mu_max**2, dtype=dtype)
+        zero_tol = jnp.asarray(zero_tol, dtype=dtype)
+
+        if LOS is None:
+            LOS_vec = self.LOS
+        else:
+            LOS_vec = jnp.asarray(LOS, dtype=dtype)
+            LOS_vec = LOS_vec / jnp.linalg.norm(LOS_vec)
+        los_x, los_y, los_z = LOS_vec
 
         def plane_body(p, carry):
             P_sum, N_sum = carry
@@ -118,7 +139,16 @@ class Measure_Pk:
 
             k2 = kxy2 + kz2[p]
             kmag = jnp.sqrt(jnp.maximum(k2, 0.0))
-            mu2 = jnp.where(k2 > 0, kz2[p] / k2, 0.0).astype(dtype)
+
+            # Compute (k \cdot LOS) on this kz-plane
+            # kx: (ng,), ky: (ng,), kz[p]: scalar
+            kdot = (
+                kx[:, None] * los_x +
+                ky[None, :] * los_y +
+                kz[p] * los_z
+            ).astype(dtype)
+
+            mu2 = jnp.where(k2 > 0, (kdot * kdot) / k2, 0.0)
 
             # Legendre factor
             if ell == 0:
@@ -131,7 +161,16 @@ class Measure_Pk:
             # mu-range mask + exclude DC at (0,0,0)
             mask_mu = (mu2 >= mu2_min) & (mu2 <= mu2_max)
             mask_dc = ~((p == 0) & (kmag == 0.0))
-            mask = (mask_mu & mask_dc).astype(dtype)
+
+            if ignore_zero:
+                # Use amplitude-based threshold to be robust for complex fields
+                amp1 = jnp.abs(fk1)
+                amp2 = jnp.abs(fk2)
+                mask_nz = (amp1 > zero_tol) & (amp2 > zero_tol)
+            else:
+                mask_nz = jnp.ones_like(k2, dtype=bool)
+            
+            mask = (mask_mu & mask_dc & mask_nz).astype(dtype)
 
             kidx = jnp.digitize(kmag.ravel(), edges, right=True)
             wP = (deg * (cross * leg * mask).ravel()).astype(dtype)
@@ -149,7 +188,7 @@ class Measure_Pk:
         return out
 
     @partial(jit, static_argnames=('self',))
-    def compute_mu_mean(self, mu_min=0.0, mu_max=1.0):
+    def compute_mu_mean(self, mu_min=0.0, mu_max=1.0, LOS=None):
         """Return ⟨mu⟩ over mu in [mu_min, mu_max]; rfftn implies kz >= 0 thus mu >= 0 (no sign cancellation)."""
         dtype = self.dtype
         mu2_min = jnp.asarray(mu_min**2, dtype=dtype)
@@ -157,13 +196,31 @@ class Measure_Pk:
         ng = self.ng
         kxy2 = self.kxy2
         kz2  = self.kz2
+        kx = self.kx
+        ky = self.ky
+        kz = self.kz
+
+        if LOS is None:
+            LOS_vec = self.LOS
+        else:
+            LOS_vec = jnp.asarray(LOS, dtype=dtype)
+            LOS_vec = LOS_vec / jnp.linalg.norm(LOS_vec)
+        los_x, los_y, los_z = LOS_vec
 
         def plane_body(p, carry):
             num, den = carry
             deg = jnp.where((p == 0) | ((ng % 2 == 0) & (p == ng // 2)), 1.0, 2.0).astype(dtype)
             k2 = kxy2 + kz2[p]
             kmag = jnp.sqrt(jnp.maximum(k2, 0.0))
-            mu = jnp.where(k2 > 0, jnp.sqrt(kz2[p] / k2), 0.0).astype(dtype)
+            # k \cdot LOS on this kz-plane
+            kdot = (
+                kx[:, None] * los_x +
+                ky[None, :] * los_y +
+                kz[p] * los_z
+            ).astype(dtype)
+
+            mu = jnp.where(k2 > 0, jnp.abs(kdot) / jnp.sqrt(k2), 0.0)
+
             mask = ((mu*mu >= mu2_min) & (mu*mu <= mu2_max)).astype(dtype)
             mask = jnp.where((p == 0) & (kmag == 0.0), 0.0, mask)
             num += jnp.sum(mu * mask) * deg
@@ -174,6 +231,252 @@ class Measure_Pk:
         den0 = jnp.array(0.0, dtype=dtype)
         num, den = lax.fori_loop(0, kz2.shape[0], plane_body, (num0, den0))
         return jnp.where(den > 0, num / den, 0.0)
+    
+
+class Measure_Xi_FFT:
+    """
+    Isotropic / anisotropic xi(r) via IRFFT and spherical (r, mu) binning on a periodic box.
+    Design mirrors Measure_Pk:
+      - Precompute only minimal-image radii structures and r-bin stats.
+      - Stream over kz-planes in both precompute and call.
+      - Use ops.segment_sum for bin accumulation.
+    """
+    def __init__(self,
+                 boxsize,
+                 ng,
+                 rbin_edges,
+                 ell_max=0,
+                 leg_fac=True,
+                 *,
+                 include_r0=False,
+                 dtype=jnp.float32):
+        self.boxsize = jnp.asarray(boxsize, dtype)
+        self.vol     = self.boxsize ** 3
+        self.ng      = int(ng)
+        self.dtype   = jnp.dtype(dtype)
+        self.ell_max = int(ell_max)
+        self.leg_fac = bool(leg_fac)
+        self.include_r0 = bool(include_r0)
+
+        # --- Minimal-image radii on a Cartesian grid: Δr = L/N (no 2π here) ---
+        dx  = self.boxsize / self.ng
+        idx = jnp.arange(self.ng, dtype=self.dtype)
+        dmin = jnp.minimum(idx, self.ng - idx) * dx                 # (>=0), (ng,)
+        self.rx2 = (dmin * dmin).astype(self.dtype)                 # (ng,)
+        self.ry2 = self.rx2
+        self.rz2 = self.rx2
+        self.rxy2 = (self.rx2[:, None] + self.ry2[None, :]).astype(self.dtype)  # (ng, ng)
+
+        # --- r-bin edges and centers (user controls range; recommended [0, L/2]) ---
+        self.rbin_edges   = jnp.asarray(rbin_edges, dtype=self.dtype)
+        self.num_rbins    = int(self.rbin_edges.shape[0] - 1)
+        self.rbin_centers = 0.5 * (self.rbin_edges[1:] + self.rbin_edges[:-1])
+
+        # --- Precompute <r> per r-bin and total counts (no mu mask, no Legendre) ---
+        self.r_mean, self.Nr_all = self._precompute_bin_stats()
+
+        # --- Optional k-grid for soft taper near Nyquist to reduce ringing in real space ---
+        kx, ky, kz = _k1d(self.ng, float(self.boxsize), dtype=self.dtype)
+        self.kx2  = (kx * kx).astype(self.dtype)
+        self.ky2  = (ky * ky).astype(self.dtype)
+        self.kz2  = (kz * kz).astype(self.dtype)
+        self.kxy2 = (self.kx2[:, None] + self.ky2[None, :]).astype(self.dtype)
+        self.k_nyq = jnp.pi * (self.ng / self.boxsize).astype(self.dtype)
+
+        # --- Legendre normalization (same policy as Measure_Pk) ---
+        self._leg_scalar = {ell: (2*ell + 1) if self.leg_fac else 1.0
+                            for ell in range(0, self.ell_max + 1, 2)}
+
+    # -------------------------------------------------------------------------
+    # Precompute r-bin stats: <r> and counts over the full grid (no mu mask)
+    # -------------------------------------------------------------------------
+    @partial(jit, static_argnames=('self',))
+    def _precompute_bin_stats(self):
+        num_r = self.num_rbins
+        edges = self.rbin_edges
+        ng = self.ng
+        rxy2 = self.rxy2
+        rz2  = self.rz2
+        dtype = self.dtype
+        include_r0 = self.include_r0
+
+        def plane_body(p, carry):
+            r_sum, n_sum = carry
+            r = jnp.sqrt(jnp.maximum(rxy2 + rz2[p], 0.0))      # (ng, ng)
+
+            # Handle the origin voxel depending on include_r0
+            mask = jnp.ones_like(r, dtype=bool)
+            mask = jnp.where((p == 0), mask.at[0, 0].set(include_r0), mask)
+
+            ridx = jnp.digitize(r.ravel(), edges, right=True)  # [0..num_r+1]
+            w = (mask.ravel()).astype(dtype)
+
+            r_tot = ops.segment_sum((r.ravel() * w).astype(dtype), ridx, num_r + 2)[1:-1]
+            N_tot = ops.segment_sum(w,                                    ridx, num_r + 2)[1:-1]
+            return (r_sum + r_tot, n_sum + N_tot)
+
+        r0 = jnp.zeros((num_r,), dtype=dtype)
+        n0 = jnp.zeros((num_r,), dtype=dtype)
+        r_sum, n_sum = lax.fori_loop(0, ng, plane_body, (r0, n0))
+        r_mean = jnp.where(n_sum > 0, r_sum / n_sum, 0.0)
+        return r_mean, n_sum
+
+    # -------------------------------------------------------------------------
+    # Main: compute xi multipole (ell) over a mu-range, or xi(r,mu) 2D if mu_edges is given.
+    # Mirrors Measure_Pk: streaming over kz-planes, ops.segment_sum accumulation.
+    # -------------------------------------------------------------------------
+    @partial(jit, static_argnames=('self', 'ell', 'mu_edges'))
+    def __call__(self,
+                 fieldk1,
+                 fieldk2=None,
+                 *,
+                 ell=0,
+                 mu_min=0.0,
+                 mu_max=1.0,
+                 mu_edges=None,          # if provided (1D edges in [0,1]), return xi(r,mu) 2D
+                 ):
+        """
+        Compute xi from two rfft fields (auto if fieldk2 is None).
+
+        If `mu_edges is None`:
+            returns (nbin_r, 3) with columns [<r>, xi_ell(r), counts] for the requested `ell`
+            using Legendre weighting over mu in [mu_min, mu_max].
+
+        If `mu_edges is not None`:
+            returns (nbin_r, nbin_mu, 3):
+                [:,:,0] = <r> per r-bin
+                [:,:,1] = xi(r, mu) averaged over each (r,mu) bin
+                [:,:,2] = counts in each (r,mu) bin
+        """
+        dtype = self.dtype
+        ctype = jnp.complex64 if dtype == jnp.float32 else jnp.complex128
+        ng = self.ng
+
+        # Validate ell
+        ell = int(ell)
+        if mu_edges is None:
+            # Multipole mode
+            if ell % 2 != 0 or ell < 0 or ell > self.ell_max:
+                raise ValueError(f"ell={ell} not supported; must be even in [0, {self.ell_max}]")
+            leg_scalar = jnp.asarray(self._leg_scalar[ell], dtype=dtype)
+
+        # Build cross power on rfft grid
+        fk1 = fieldk1.astype(ctype)
+        fk2 = fk1 if fieldk2 is None else fieldk2.astype(ctype)
+        Pk  = (fk1 * jnp.conj(fk2)).real.astype(dtype) / self.vol
+
+        # IRFFT to get xi(x) on the full (ng,ng,ng) grid
+        xi_grid = jnp.fft.irfftn(Pk, s=(ng, ng, ng), norm='forward').astype(dtype)
+
+        # Prebind references
+        rxy2 = self.rxy2
+        rz2  = self.rz2
+        r_edges = self.rbin_edges
+        num_r   = self.num_rbins
+        include_r0 = self.include_r0
+
+        # Option A: xi_ell(r) over mu in [mu_min, mu_max]
+        if mu_edges is None:
+            mu2_min = jnp.asarray(mu_min**2, dtype=dtype)
+            mu2_max = jnp.asarray(mu_max**2, dtype=dtype)
+
+            def plane_body(p, carry):
+                Xi_sum, N_sum = carry
+                r2   = jnp.maximum(rxy2 + rz2[p], 0.0)       # (ng, ng)
+                r    = jnp.sqrt(r2)
+                xi_p = xi_grid[..., p]
+
+                # mu^2 = (rz^2)/r^2 for r>0
+                mu2 = jnp.where(r2 > 0, rz2[p] / r2, 0.0).astype(dtype)
+
+                # Legendre factor (even ell only)
+                if ell == 0:
+                    leg = jnp.ones_like(mu2) * leg_scalar
+                elif ell == 2:
+                    leg = leg_scalar * 0.5 * (3.0 * mu2 - 1.0)
+                else:
+                    # ell==4 (supported if ell_max>=4) using μ^2 polynomial form
+                    leg = leg_scalar * 0.125 * (35.0 * mu2**2 - 30.0 * mu2 + 3.0)
+
+                # mu-range mask and origin handling
+                mask_mu = (mu2 >= mu2_min) & (mu2 <= mu2_max)
+                mask = mask_mu
+                if not include_r0:
+                    mask = jnp.where(p == 0, mask.at[0, 0].set(False), mask)
+
+                ridx = jnp.digitize(r.ravel(), r_edges, right=True)  # [0..num_r+1]
+                wN   = (mask.ravel()).astype(dtype)
+                wX   = (xi_p.ravel() * leg.ravel() * wN).astype(dtype)
+
+                Xi_add = ops.segment_sum(wX, ridx, num_r + 2)[1:-1]
+                N_add  = ops.segment_sum(wN, ridx, num_r + 2)[1:-1]
+                return (Xi_sum + Xi_add, N_sum + N_add)
+
+            X0 = jnp.zeros((num_r,), dtype=dtype)
+            N0 = jnp.zeros((num_r,), dtype=dtype)
+            Xi_sum, N_sum = lax.fori_loop(0, ng, plane_body, (X0, N0))
+
+            xi_binned = jnp.where(N_sum > 0, Xi_sum / N_sum, 0.0)
+            out = jnp.stack([self.r_mean, xi_binned * self.vol, N_sum], axis=1)
+            return out
+
+        # Option B: xi(r, mu) on a 2D (r,mu) grid
+        else:
+            mu_edges = jnp.asarray(mu_edges, dtype=dtype)
+            num_mu   = int(mu_edges.shape[0] - 1)
+
+            # We encode a 2D (r,mu) bin index as: idx2d = rbin + num_r * mubin
+            nseg = num_r * num_mu
+
+            def plane_body_2d(p, carry):
+                Xi_sum2d, N_sum2d = carry
+                r2   = jnp.maximum(rxy2 + rz2[p], 0.0)       # (ng, ng)
+                r    = jnp.sqrt(r2)
+                xi_p = xi_grid[..., p]
+
+                # mu in [0,1] using positive LOS (rfftn implies kz>=0)
+                mu = jnp.where(r2 > 0, jnp.sqrt(rz2[p] / r2), 0.0).astype(dtype)
+
+                # Handle origin voxel
+                mask = jnp.ones_like(r, dtype=bool)
+                mask = jnp.where(p == 0, mask.at[0, 0].set(include_r0), mask)
+
+                # Digitize in r and mu
+                rbin = jnp.digitize(r.ravel(),  r_edges, right=True)  # [0..num_r+1]
+                mbin = jnp.digitize(mu.ravel(), mu_edges, right=True) # [0..num_mu+1]
+
+                # Keep only interior bins (1..num) then shift to 0..num-1 via [1:-1]
+                # Build a combined 2D index; invalid entries will be masked by weight=0
+                r_ok = (rbin > 0) & (rbin < (num_r + 1))
+                m_ok = (mbin > 0) & (mbin < (num_mu + 1))
+                ok   = r_ok & m_ok & mask.ravel()
+
+                r0 = jnp.clip(rbin - 1, 0, num_r - 1)
+                m0 = jnp.clip(mbin - 1, 0, num_mu - 1)
+                idx2d = r0 + num_r * m0
+
+                wN = ok.astype(dtype)
+                wX = (xi_p.ravel() * wN).astype(dtype)
+
+                Xi_add = ops.segment_sum(wX,  idx2d, nseg)
+                N_add  = ops.segment_sum(wN,  idx2d, nseg)
+                return (Xi_add + Xi_sum2d, N_add + N_sum2d)
+
+            X0 = jnp.zeros((nseg,), dtype=dtype)
+            N0 = jnp.zeros((nseg,), dtype=dtype)
+            Xi_sum2d, N_sum2d = lax.fori_loop(0, ng, plane_body_2d, (X0, N0))
+
+            xi2d = jnp.where(N_sum2d > 0, Xi_sum2d / N_sum2d, 0.0).reshape(num_mu, num_r)
+            cnt2 = N_sum2d.reshape(num_mu, num_r)
+
+            # Return as (num_r, num_mu, 3) to match the [r, value, count] style per (r,mu)
+            # We broadcast <r> along mu.
+            r_mean_2d = jnp.broadcast_to(self.r_mean[None, :], (num_mu, num_r)).T  # (num_r, num_mu)
+            xi2d_out  = xi2d.T   # (num_r, num_mu)
+            cnt2_out  = cnt2.T   # (num_r, num_mu)
+            out = jnp.stack([r_mean_2d, xi2d_out * self.vol, cnt2_out], axis=2)
+            return out
+
 
 # ============================================================
 # FFT-based P(k) & B(k)
